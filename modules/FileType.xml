@@ -407,7 +407,7 @@
         log, log.1
     </extensions>
     <dirs>
-        logs
+        logs, log
     </dirs>
     <weight>
         40
@@ -1666,13 +1666,31 @@
 
 <type>
     <id>
-        QT_TS
+        QT_QPH
     </id>
     <summary>
         Qt Translation file
     </summary>
     <extensions>
-        ts, qph
+        qph
+    </extensions>
+    <weight>
+        40
+    </weight>
+    <format>
+        Text
+    </format>
+</type>
+
+<type>
+    <id>
+        QT_MS_TS
+    </id>
+    <summary>
+        Qt Translation or MS TypeScript file
+    </summary>
+    <extensions>
+        ts
     </extensions>
     <weight>
         40
@@ -1959,6 +1977,96 @@
 
 <type>
     <id>
+        SEED7_INCLUDE
+    </id>
+    <summary>
+        Seed7 include/library
+    </summary>
+    <extensions>
+        s7i
+    </extensions>
+    <weight>
+        50
+    </weight>
+    <format>
+        Text
+    </format>
+</type>
+
+<type>
+    <id>
+        SEED7_PROGRAM
+    </id>
+    <summary>
+        Seed7 program
+    </summary>
+    <extensions>
+        sd7
+    </extensions>
+    <weight>
+        50
+    </weight>
+    <format>
+        Text
+    </format>
+</type>
+
+<type>
+    <id>
+        HASKELL_SOURCE
+    </id>
+    <summary>
+        Haskell program
+    </summary>
+    <extensions>
+        hs
+    </extensions>
+    <weight>
+        50
+    </weight>
+    <format>
+        Text
+    </format>
+</type>
+
+<type>
+    <id>
+        HASKELL_CABAL
+    </id>
+    <summary>
+        Haskell metadata
+    </summary>
+    <extensions>
+        cabal
+    </extensions>
+    <weight>
+        50
+    </weight>
+    <format>
+        Text
+    </format>
+</type>
+
+<type>
+    <id>
+        RUST
+    </id>
+    <summary>
+        Rust program
+    </summary>
+    <extensions>
+        rs
+    </extensions>
+    <weight>
+        50
+    </weight>
+    <format>
+        Text
+    </format>
+</type>
+
+<type>
+    <id>
         PASCAL
     </id>
     <summary>
@@ -2017,6 +2125,24 @@
     </summary>
     <extensions>
         js, sjs, jsm
+    </extensions>
+    <weight>
+        50
+    </weight>
+    <format>
+        Text
+    </format>
+</type>
+
+<type>
+    <id>
+        COFFEESCRIPT
+    </id>
+    <summary>
+        CoffeeScript file
+    </summary>
+    <extensions>
+        coffee
     </extensions>
     <weight>
         50
@@ -2695,7 +2821,7 @@
         Shell program
     </summary>
     <extensions>
-        sh, SH, csh, ksh, bash
+        sh, SH, csh, ksh, bash, tcsh, zsh
     </extensions>
     <weight>
         70
@@ -2877,6 +3003,9 @@
     <weight>
         40
     </weight>
+    <format>
+        Text
+    </format>
 </type>
 
 <type>
@@ -3379,6 +3508,24 @@
 
 <type>
     <id>
+        SCSS
+    </id>
+    <summary>
+        Sass CSS style sheet
+    </summary>
+    <extensions>
+        scss
+    </extensions>
+    <weight>
+        40
+    </weight>
+    <format>
+        Text
+    </format>
+</type>
+
+<type>
+    <id>
         DATA
     </id>
     <summary>
@@ -3556,13 +3703,115 @@
 
 <type>
     <id>
+        CACHE
+    </id>
+    <summary>
+        Cache file
+    </summary>
+    <extensions>
+        cache
+    </extensions>
+    <weight>
+        40
+    </weight>
+    <format>
+        Text
+    </format>
+</type>
+
+<type>
+    <id>
+        HIDDEN
+    </id>
+    <summary>
+        Hidden file
+    </summary>
+    <weight>
+        40
+    </weight>
+    <format>
+        Text
+    </format>
+</type>
+
+<type>
+    <id>
+        BACKUP
+    </id>
+    <summary>
+        Backup file
+    </summary>
+    <extensions>
+        bak
+    </extensions>
+    <weight>
+        40
+    </weight>
+    <format>
+        Text
+    </format>
+</type>
+
+<type>
+    <id>
+        SERVICE
+    </id>
+    <summary>
+        Service file
+    </summary>
+    <extensions>
+        service
+    </extensions>
+    <weight>
+        40
+    </weight>
+    <format>
+        Text
+    </format>
+</type>
+
+<type>
+    <id>
+        YUM_DB
+    </id>
+    <summary>
+        Yum DB file
+    </summary>
+    <dirs>
+        yumdb
+    </dirs>
+    <weight>
+        40
+    </weight>
+</type>
+
+<type>
+    <id>
+        FIRMWARE
+    </id>
+    <summary>
+        Firmware file
+    </summary>
+    <extensions>
+        fw
+    </extensions>
+    <weight>
+        40
+    </weight>
+    <format>
+        Binary
+    </format>
+</type>
+
+<type>
+    <id>
         CONFIGURATION
     </id>
     <summary>
         Configuration file
     </summary>
     <extensions>
-        conf, config, cfg, cnf, inf, INF, sysconf, sysconfig
+        conf, config, cfg, cnf, inf, INF, sysconf, sysconfig, rules
     </extensions>
     <names>
         Config, config
@@ -3779,7 +4028,7 @@
         tar.bz2, tbz2, tbz, tb2, tar.lzma, tlzma
         tar.lz, tlz, zip, zae, tar, lzma, gz
         jar, war, ear, xz, 7z, rar, sfx, ace
-        bz, bz2, zipx
+        bz, bz2, zipx, apk
     </extensions>
     <weight>
         10

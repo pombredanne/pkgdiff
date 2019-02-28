@@ -1,9 +1,9 @@
 #!/usr/bin/perl
 ###########################################################################
-# PkgDiff - Package Changes Analyzer 1.7.2
+# PkgDiff - Package Changes Analyzer 1.8
 # A tool for visualizing changes in Linux software packages
 #
-# Copyright (C) 2012-2016 Andrey Ponomarenko's ABI Laboratory
+# Copyright (C) 2012-2018 Andrey Ponomarenko's ABI Laboratory
 #
 # Written by Andrey Ponomarenko
 #
@@ -13,7 +13,7 @@
 #
 # PACKAGE FORMATS
 # ===============
-#  RPM, DEB, TAR.GZ, etc.
+#  RPM, DEB, TAR.GZ, JAR, etc.
 #
 # REQUIREMENTS
 # ============
@@ -22,6 +22,7 @@
 #  GNU Wdiff
 #  GNU Awk
 #  GNU Binutils (readelf)
+#  Perl-File-LibMagic
 #  RPM (rpm, rpmbuild, rpm2cpio) for analysis of RPM-packages
 #  DPKG (dpkg, dpkg-deb) for analysis of DEB-packages
 #
@@ -42,6 +43,7 @@
 # You should have received a copy of the GNU General Public License along
 # with this program. If not, see <http://www.gnu.org/licenses/>.
 ###########################################################################
+use strict;
 use Getopt::Long;
 Getopt::Long::Configure ("posix_default", "no_ignore_case", "permute");
 use File::Path qw(mkpath rmtree);
@@ -52,14 +54,15 @@ use Cwd qw(abs_path cwd);
 use Config;
 use Fcntl;
 
-my $TOOL_VERSION = "1.7.2";
+my $TOOL_VERSION = "1.8";
 my $ORIG_DIR = cwd();
 
 # Internal modules
-my $MODULES_DIR = get_Modules();
-push(@INC, get_dirname($MODULES_DIR));
+my $MODULES_DIR = getModules();
+push(@INC, getDirname($MODULES_DIR));
 
 my $DIFF = $MODULES_DIR."/Internals/Tools/rfcdiff-1.41-CUSTOM.sh";
+my $JAVA_DUMP = $MODULES_DIR."/Internals/Tools/java-dump.sh";
 my $ACC = "abi-compliance-checker";
 my $ACC_VER = "1.99.1";
 my $ABI_DUMPER = "abi-dumper";
@@ -67,13 +70,13 @@ my $ABI_DUMPER_VER = "0.97";
 
 my ($Help, $ShowVersion, $DumpVersion, $GenerateTemplate, %Descriptor,
 $CheckUsage, $PackageManager, $OutputReportPath, $ShowDetails, $Debug,
-$SizeLimit, $QuickMode, $DiffWidth, $DiffLines, $Minimal,
+$SizeLimit, $QuickMode, $DiffWidth, $DiffLines, $Minimal, $NoWdiff,
 $IgnoreSpaceChange, $IgnoreAllSpace, $IgnoreBlankLines, $ExtraInfo,
 $CustomTmpDir, $HideUnchanged, $TargetName, $TargetTitle, %TargetVersion,
 $CompareDirs, $ListAddedRemoved, $SkipSubArchives, $LinksTarget,
-$SkipPattern);
+$SkipPattern, $AllText, $CheckByteCode, $FullMethodDiffs, $TrackUnchanged);
 
-my $CmdName = get_filename($0);
+my $CmdName = getFilename($0);
 
 my %ERROR_CODE = (
     # Unchanged verdict
@@ -90,11 +93,11 @@ my %ERROR_CODE = (
     "Module_Error"=>9
 );
 
-my $HomePage = "http://lvc.github.com/pkgdiff/";
+my $HomePage = "https://github.com/lvc/pkgdiff";
 
 my $ShortUsage = "Package Changes Analyzer (PkgDiff) $TOOL_VERSION
 A tool for visualizing changes in Linux software packages
-Copyright (C) 2016 Andrey Ponomarenko's ABI Laboratory
+Copyright (C) 2018 Andrey Ponomarenko's ABI Laboratory
 License: GNU GPL
 
 Usage: $CmdName PKG1 PKG2 [options]
@@ -128,6 +131,7 @@ GetOptions("h|help!" => \$Help,
   "ignore-blank-lines" => \$IgnoreBlankLines,
   "quick!" => \$QuickMode,
   "minimal!" => \$Minimal,
+  "no-wdiff!" => \$NoWdiff,
   "extra-info=s" => \$ExtraInfo,
   "tmp-dir=s" => \$CustomTmpDir,
   "hide-unchanged!" => \$HideUnchanged,
@@ -140,8 +144,12 @@ GetOptions("h|help!" => \$Help,
   "list-added-removed!" => \$ListAddedRemoved,
   "skip-subarchives!" => \$SkipSubArchives,
   "skip-pattern=s" => \$SkipPattern,
-  "links-target=s" => \$LinksTarget
-) or ERR_MESSAGE();
+  "all-text!" => \$AllText,
+  "links-target=s" => \$LinksTarget,
+  "check-byte-code!" => \$CheckByteCode,
+  "full-method-diffs!" => \$FullMethodDiffs,
+  "track-unchanged!" => \$TrackUnchanged
+) or errMsg();
 
 my $TMP_DIR = undef;
 
@@ -158,16 +166,16 @@ else {
 
 sub cleanTmp()
 {
-    foreach ("null", "error",
+    foreach my $E ("null", "error",
     "unpack", "output", "fmt",
     "content1", "content2",
     "xcontent1", "xcontent2")
     {
-        if(-f $TMP_DIR."/".$_) {
-            unlink($TMP_DIR."/".$_);
+        if(-f $TMP_DIR."/".$E) {
+            unlink($TMP_DIR."/".$E);
         }
-        elsif(-d $TMP_DIR."/".$_) {
-            rmtree($TMP_DIR."/".$_);
+        elsif(-d $TMP_DIR."/".$E) {
+            rmtree($TMP_DIR."/".$E);
         }
     }
 }
@@ -180,11 +188,11 @@ if(@ARGV)
         $Descriptor{2} = $ARGV[1];
     }
     else {
-        ERR_MESSAGE();
+        errMsg();
     }
 }
 
-sub ERR_MESSAGE()
+sub errMsg()
 {
     printMsg("INFO", "\n".$ShortUsage);
     exit($ERROR_CODE{"Error"});
@@ -193,11 +201,14 @@ sub ERR_MESSAGE()
 my $HelpMessage="
 NAME:
   Package Changes Analyzer
-  A tool for analyzing changes in Linux software packages
+  A tool for visualizing changes in Linux software packages
 
 DESCRIPTION:
-  Package Changes Analyzer (PkgDiff) is a tool for analyzing
+  Package Changes Analyzer (PkgDiff) is a tool for visualizing
   changes in Linux software packages (RPM, DEB, TAR.GZ, etc).
+  
+  The tool can compare directories as well (with the help of
+  the -d option).
 
   The tool is intended for Linux maintainers who are interested
   in ensuring compatibility of old and new versions of packages.
@@ -207,9 +218,11 @@ DESCRIPTION:
 
 USAGE:
   $CmdName PKG1 PKG2 [options]
+  $CmdName -d DIR1/ DIR2/ [options]
 
 EXAMPLES:
   $CmdName OLD.rpm NEW.rpm
+  $CmdName OLD.deb NEW.deb
   $CmdName OLD.tar.gz NEW.tar.gz
 
 ARGUMENTS:
@@ -260,7 +273,7 @@ GENERAL OPTIONS:
 
   -width WIDTH
       Width of the Visual Diff.
-      Default: 75
+      Default: 80
 
   -prelines NUM
       Size of the context in the Visual Diff.
@@ -280,6 +293,11 @@ GENERAL OPTIONS:
 
   -minimal
       Try to find a smaller set of changes.
+  
+  -no-wdiff
+      Do not use GNU Wdiff for analysis of changes.
+      This may be two times faster, but produces lower
+      quality reports.
 
 OTHER OPTIONS:
   -check-usage
@@ -320,8 +338,8 @@ OTHER OPTIONS:
   
   -links-target TARGET
       Set target attribute for links in the report:
-        _self
-        _blank (default)
+        _self (default)
+        _blank
   
   -list-added-removed
       Show content of added and removed text files.
@@ -330,10 +348,22 @@ OTHER OPTIONS:
       Skip checking of archives inside the input packages.
   
   -skip-pattern REGEX
-      Skip checking of paths within archives matching REGEX.
+      Don't check files matching REGEX.
   
   -d|-directories
       Compare directories instead of packages.
+  
+  -all-text
+      Treat all files in the archive as text files.
+
+  -check-byte-code
+      When comparing Java classes, also check for byte code changes.
+
+  -full-method-diffs
+      Perform a full diff of method bodies when -check-byte-code is specified.
+
+  -track-unchanged
+      Track unchanged files in extra info.
 
 REPORT:
     Report will be generated to:
@@ -346,7 +376,7 @@ EXIT CODES:
 MORE INFORMATION:
     ".$HomePage."\n";
 
-sub HELP_MESSAGE() {
+sub helpMsg() {
     printMsg("INFO", $HelpMessage."\n");
 }
 
@@ -381,10 +411,12 @@ my $RENAME_FILE_MATCH = 0.55;
 my $RENAME_CONTENT_MATCH = 0.85;
 my $MOVE_CONTENT_MATCH = 0.90;
 my $MOVE_DEPTH = 4;
-my $DEFAULT_WIDTH = 75;
+my $DEFAULT_WIDTH = 80;
 my $DIFF_PRE_LINES = 10;
 my $EXACT_DIFF_SIZE = 256*1024;
 my $EXACT_DIFF_RATE = 0.1;
+
+my $USE_LIBMAGIC = 0;
 
 my %Group = (
     "Count1"=>0,
@@ -424,6 +456,7 @@ my %DepChanges;
 my %AddedFiles;
 my %RemovedFiles;
 my %ChangedFiles;
+my %UnchangedFiles;
 my %StableFiles;
 my %RenamedFiles;
 my %RenamedFiles_R;
@@ -468,14 +501,15 @@ my %ArchiveFormats = (
     "XZ"       => ["xz"],
 
     "JAR"      => ["jar", "war",
-                   "ear"]
+                   "ear"],
+    "APK"      => ["apk"]
 );
 
 my $ARCHIVE_EXT = getArchivePattern();
 
-sub get_Modules()
+sub getModules()
 {
-    my $TOOL_DIR = get_dirname($0);
+    my $TOOL_DIR = getDirname($0);
     if(not $TOOL_DIR) {
         $TOOL_DIR = ".";
     }
@@ -754,6 +788,7 @@ sub compareFiles($$$$)
         $Changed = 1;
         $Rate = checkDiff($P1, $P2);
     }
+    
     if($DLink or $Changed)
     {
         if($ShowDetails)
@@ -772,6 +807,7 @@ sub compareFiles($$$$)
         $RLink=~s/\A\Q$REPORT_DIR\E\///;
         return (1, $DLink, $RLink, $Rate, $Adv);
     }
+    
     return (0, "", "", 0, {});
 }
 
@@ -804,10 +840,11 @@ sub checkDiff($$)
     if($AvgSize<$EXACT_DIFF_SIZE
     and $Rate<$EXACT_DIFF_RATE)
     {
+        my $TmpFile = $TMP_DIR."/null";
         if(-T $P1)
         { # Text
             my $TDiff = $TMP_DIR."/txtdiff";
-            system("diff -Bw \"$P1\" \"$P2\" >$TDiff 2>$TMP_DIR/null");
+            qx/diff -Bw \"$P1\" \"$P2\" >$TDiff 2>$TmpFile/;
             $Rate = getRate($P1, $P2, $TDiff);
             unlink($TDiff);
         }
@@ -818,7 +855,7 @@ sub checkDiff($$)
             my $T2 = $TMP_DIR."/tmp2.txt";
             writeFile($T1, hexDump($P1));
             writeFile($T2, hexDump($P2));
-            system("diff -Bw \"$T1\" \"$T2\" >$TDiff 2>$TMP_DIR/null");
+            qx/diff -Bw \"$T1\" \"$T2\" >$TDiff 2>$TmpFile/;
             unlink($T1);
             unlink($T2);
             $Rate = getRate($P1, $P2, $TDiff);
@@ -834,8 +871,10 @@ sub checkDiff($$)
 sub showFile($$$)
 {
     my ($Path, $Format, $Version) = @_;
-    my ($Dir, $Name) = separate_path($Path);
-    my $Cmd = "";
+    my ($Dir, $Name) = sepPath($Path);
+    
+    my $Cmd = undef;
+    
     if($Format eq "MANPAGE")
     {
         $Name=~s/\.(gz|bz2|xz)\Z//;
@@ -856,9 +895,8 @@ sub showFile($$$)
         if($#Contents==0) {
             $Cmd = "cat \"$Unpack/".$Contents[0]."\"";
         }
-        else
-        {
-            return "";
+        else {
+            return undef;
         }
     }
     elsif($Format eq "SHARED_OBJECT"
@@ -880,21 +918,38 @@ sub showFile($$$)
     }
     elsif($Format eq "JAVA_CLASS")
     {
-        if(not check_Cmd("javap")) {
-            return "";
+        if(not checkCmd("javap")) {
+            return undef;
         }
         $Name=~s/\.class\Z//;
         $Name=~s/\$/./;
         $Path = $Name;
-        $Cmd = "javap \"$Path\""; # -s -c -private -verbose
+        if ($CheckByteCode) {
+            if ($FullMethodDiffs) {
+                $Cmd = "$JAVA_DUMP \"$Path\"";
+            } else {
+                $Cmd = "$JAVA_DUMP -s \"$Path\"";
+            }
+        } else {
+            $Cmd = "javap \"$Path\""; # -c -private -verbose
+        }
         chdir($Dir);
     }
+    else
+    { # error
+        return undef;
+    }
+    
     my $SPath = $TMP_DIR."/fmt/".$Format."/".$Version."/".$Name;
-    mkpath(get_dirname($SPath));
-    system($Cmd." >\"".$SPath."\" 2>$TMP_DIR/null");
+    mkpath(getDirname($SPath));
+    
+    my $TmpFile = $TMP_DIR."/null";
+    qx/$Cmd >"$SPath" 2>$TmpFile/;
+    
     if($Format eq "JAVA_CLASS") {
         chdir($ORIG_DIR);
     }
+    
     if($Format eq "SHARED_OBJECT"
     or $Format eq "KERNEL_MODULE"
     or $Format eq "DEBUG_INFO"
@@ -920,6 +975,7 @@ sub showFile($$$)
         $Content=~s/\s+Build ID: \w+\s+//g;
         writeFile($SPath, uniqStr($Content));
     }
+    
     return $SPath;
 }
 
@@ -952,7 +1008,7 @@ sub compareABIs($$$$$)
     my ($P1, $P2, $N1, $N2, $Path) = @_;
     
     my $Sect = `readelf -S \"$P1\" 2>\"$TMP_DIR/error\"`;
-    my $Name = get_filename($P1);
+    my $Name = getFilename($P1);
     
     if($Sect!~/\.debug_info/)
     { # No DWARF info
@@ -960,11 +1016,11 @@ sub compareABIs($$$$$)
         return ("", {});
     }
     
-    mkpath(get_dirname($Path));
+    mkpath(getDirname($Path));
     my $Adv = {};
     
     $Name=~s/\.debug\Z//;
-    printMsg("INFO", "Compare ABIs of ".$Name." (".show_number(getSize($P1)/1048576)."M) ...");
+    printMsg("INFO", "Compare ABIs of ".$Name." (".showNumber(getSize($P1)/1048576)."M) ...");
     
     $N1=~s/\A\///;
     $N2=~s/\A\///;
@@ -998,7 +1054,7 @@ sub compareABIs($$$$$)
     if($Debug)
     {
         my $DP = $REPORT_DIR."/dwarf_dumps/".$Group{"V1"}."/".$N1."-DWARF.dump";
-        mkpath(get_dirname($DP));
+        mkpath(getDirname($DP));
         move("$TMP_DIR/extra-info/debug_info", $DP);
         
         $Adv->{"DWARFDump"}{1} = $DP;
@@ -1022,7 +1078,7 @@ sub compareABIs($$$$$)
     if($Debug)
     {
         my $DP = $REPORT_DIR."/dwarf_dumps/".$Group{"V2"}."/".$N2."-DWARF.dump";
-        mkpath(get_dirname($DP));
+        mkpath(getDirname($DP));
         move("$TMP_DIR/extra-info/debug_info", $DP);
         
         $Adv->{"DWARFDump"}{2} = $DP;
@@ -1069,6 +1125,19 @@ sub compareABIs($$$$$)
     return ($Path, $Adv);
 }
 
+sub checkModule($)
+{
+    foreach my $P (@INC)
+    {
+        if(-e $P."/".$_[0])
+        {
+            return 1;
+        }
+    }
+    
+    return 0;
+}
+
 sub getSize($)
 {
     my $Path = $_[0];
@@ -1080,7 +1149,7 @@ sub getSize($)
     }
     if(-l $Path)
     { # symlinks
-        return ($Cache{"getSize"}{$Path} = length(`file -b \"$Path\"`));
+        return ($Cache{"getSize"}{$Path} = length(getType($Path)));
     }
     return ($Cache{"getSize"}{$Path} = -s $Path);
 }
@@ -1088,14 +1157,19 @@ sub getSize($)
 sub diffFiles($$$)
 {
     my ($P1, $P2, $Path) = @_;
+    
     if(not $P1 or not $P2) {
-        return "";
+        return ();
     }
-    mkpath(get_dirname($Path));
+    
+    mkpath(getDirname($Path));
+    
     my $TmpPath = $TMP_DIR."/diff";
     unlink($TmpPath);
+    
     my $Cmd = "sh $DIFF --width $DiffWidth --stdout";
     $Cmd .= " --tmpdiff \"$TmpPath\" --prelines $DiffLines";
+    
     if($IgnoreSpaceChange) {
         $Cmd .= " --ignore-space-change";
     }
@@ -1109,25 +1183,33 @@ sub diffFiles($$$)
     { # diff --minimal
         $Cmd .= " --minimal";
     }
+    if($NoWdiff) {
+        $Cmd .= " --nowdiff";
+    }
+    
     $Cmd .= " \"".$P1."\" \"".$P2."\" >\"".$Path."\" 2>$TMP_DIR/null";
     $Cmd=~s/\$/\\\$/g;
-    system($Cmd);
+    
+    qx/$Cmd/;
+    
     if(getSize($Path)<3500)
     { # may be identical
-        if(readFilePart($Path, 2)=~/The files are identical/)
+        if(readFilePart($Path, 2)=~/The files are identical/i)
         {
             unlink($Path);
-            return "";
+            return ();
         }
     }
+    
     if(getSize($Path)<3100)
     { # may be identical or non-text
         if(index(readFile($Path), "No changes")!=-1)
         {
             unlink($Path);
-            return "";
+            return ();
         }
     }
+    
     my $Rate = getRate($P1, $P2, $TmpPath);
     
     # clean space
@@ -1139,11 +1221,14 @@ sub diffFiles($$$)
 sub getRate($$$)
 {
     my ($P1, $P2, $PatchPath) = @_;
+    
     my $Size1 = getSize($P1);
     if(not $Size1) {
         return 1;
     }
+    
     my $Size2 = getSize($P2);
+    
     my $Rate = 1;
     # count removed/changed bytes
     my $Patch = readFile($PatchPath);
@@ -1163,33 +1248,39 @@ sub getRate($$$)
 sub readFilePart($$)
 {
     my ($Path, $Num) = @_;
-    return "" if(not $Path or not -f $Path);
+    
     open (FILE, $Path);
     my $Lines = "";
     foreach (1 ... $Num) {
         $Lines .= <FILE>;
     }
     close(FILE);
+    
     return $Lines;
 }
 
 sub getType($)
 {
     my $Path = $_[0];
-    if(not $Path or not -e $Path) {
-        return "";
-    }
+    
     if($Cache{"getType"}{$Path}) {
         return $Cache{"getType"}{$Path};
     }
-    return ($Cache{"getType"}{$Path} = `file -b \"$Path\"`);
+    
+    if($USE_LIBMAGIC)
+    {
+        my $Magic = File::LibMagic->new();
+        return ($Cache{"getType"}{$Path} = $Magic->describe_filename($Path));
+    }
+    
+    return ($Cache{"getType"}{$Path} = qx/file -b \"$Path\"/);
 }
 
 sub isRenamed($$$)
 {
     my ($P1, $P2, $Match) = @_;
-    my ($D1, $N1) = separate_path($P1);
-    my ($D2, $N2) = separate_path($P2);
+    my ($D1, $N1) = sepPath($P1);
+    my ($D2, $N2) = sepPath($P2);
     if($D1 ne $D2) {
         return 0;
     }
@@ -1219,28 +1310,31 @@ sub minNum($$)
     if($_[0]<$_[1]) {
         return $_[0];
     }
-    else {
-        return $_[1];
-    }
+    
+    return $_[1];
 }
 
-sub get_depth($) {
+sub getDepth($) {
     return ($_[0]=~tr![\/]!!);
 }
 
 sub getBaseLen($$)
 {
     my ($Str1, $Str2) = @_;
+    
     if(defined $Cache{"getBaseLen"}{$Str1}{$Str2}) {
         return $Cache{"getBaseLen"}{$Str1}{$Str2};
     }
+    
     if($Str1 eq $Str2) {
         return length($Str1);
     }
+    
     my $BLen = 0;
     my $Len1 = length($Str1);
     my $Len2 = length($Str2);
     my $Min = minNum($Len1, $Len2) - 1;
+    
     foreach my $Pos (0 .. $Min)
     {
         my $S1 = substr($Str1, $Pos, 1);
@@ -1252,6 +1346,7 @@ sub getBaseLen($$)
             last;
         }
     }
+    
     foreach my $Pos (0 .. $Min)
     {
         my $S1 = substr($Str1, $Len1-$Pos-1, 1);
@@ -1263,14 +1358,15 @@ sub getBaseLen($$)
             last;
         }
     }
+    
     return ($Cache{"getBaseLen"}{$Str1}{$Str2}=$BLen);
 }
 
 sub isMoved($$)
 {
     my ($P1, $P2) = @_;
-    my ($D1, $N1) = separate_path($P1);
-    my ($D2, $N2) = separate_path($P2);
+    my ($D1, $N1) = sepPath($P1);
+    my ($D2, $N2) = sepPath($P2);
     if($N1 eq $N2
     and $D1 ne $D2) {
         return 1;
@@ -1284,19 +1380,17 @@ sub writeExtraInfo()
     
     $FILES .= "<rate>\n    ".$RESULT{"affected"}."\n</rate>\n\n";
     
-    if(my @Added = sort {lc($a) cmp lc($b)} keys(%AddedFiles))
-    {
+    if(my @Added = sort {lc($a) cmp lc($b)} keys(%AddedFiles)) {
         $FILES .= "<added>\n    ".join("\n    ", @Added)."\n</added>\n\n";
     }
-    if(my @Removed = sort {lc($a) cmp lc($b)} keys(%RemovedFiles))
-    {
+    if(my @Removed = sort {lc($a) cmp lc($b)} keys(%RemovedFiles)) {
         $FILES .= "<removed>\n    ".join("\n    ", @Removed)."\n</removed>\n\n";
     }
     if(my @Moved = sort {lc($a) cmp lc($b)} keys(%MovedFiles))
     {
         $FILES .= "<moved>\n";
         foreach (@Moved) {
-            $FILES .= "    ".$_.";".$MovedFiles{$_}." (".show_number($ChangeRate{$_}*100)."%)\n";
+            $FILES .= "    ".$_.";".$MovedFiles{$_}." (".showNumber($ChangeRate{$_}*100)."%)\n";
         }
         $FILES .= "</moved>\n\n";
     }
@@ -1304,27 +1398,31 @@ sub writeExtraInfo()
     {
         $FILES .= "<renamed>\n";
         foreach (@Renamed) {
-            $FILES .= "    ".$_.";".$RenamedFiles{$_}." (".show_number($ChangeRate{$_}*100)."%)\n";
+            $FILES .= "    ".$_.";".$RenamedFiles{$_}." (".showNumber($ChangeRate{$_}*100)."%)\n";
         }
         $FILES .= "</renamed>\n\n";
     }
     if(my @Changed = sort {lc($a) cmp lc($b)} keys(%ChangedFiles))
     {
         foreach (0 .. $#Changed) {
-            $Changed[$_] .= " (".show_number($ChangeRate{$Changed[$_]}*100)."%)";
+            $Changed[$_] .= " (".showNumber($ChangeRate{$Changed[$_]}*100)."%)";
         }
         
         $FILES .= "<changed>\n    ".join("\n    ", @Changed)."\n</changed>\n\n";
     }
+    if ($TrackUnchanged) {
+        if(my @Unchanged = sort {lc($a) cmp lc($b)} keys(%UnchangedFiles))
+        {
+            $FILES .= "<unchanged>\n    ".join("\n    ", @Unchanged)."\n</unchanged>\n\n";
+        }
+    }
     writeFile($ExtraInfo."/files.xml", $FILES);
     
     my $SYMBOLS = "";
-    if(my @AddedSymbols = sort {lc($a) cmp lc($b)} keys(%AddedSymbols))
-    {
+    if(my @AddedSymbols = sort {lc($a) cmp lc($b)} keys(%AddedSymbols)) {
         $SYMBOLS .= "<added>\n    ".join("\n    ", @AddedSymbols)."\n</added>\n\n";
     }
-    if(my @RemovedSymbols = sort {lc($a) cmp lc($b)} keys(%RemovedSymbols))
-    {
+    if(my @RemovedSymbols = sort {lc($a) cmp lc($b)} keys(%RemovedSymbols)) {
         $SYMBOLS .= "<removed>\n    ".join("\n    ", @RemovedSymbols)."\n</removed>\n\n";
     }
     writeFile($ExtraInfo."/symbols.xml", $SYMBOLS);
@@ -1348,9 +1446,10 @@ sub skipFile($)
 
 sub detectChanges()
 {
-    mkpath($REPORT_DIR."/diffs");
-    mkpath($REPORT_DIR."/info-diffs");
-    mkpath($REPORT_DIR."/details");
+    foreach my $E ("info-diffs", "diffs", "details") {
+        mkpath($REPORT_DIR."/".$E);
+    }
+    
     foreach my $Format (keys(%FormatInfo))
     {
         %{$FileChanges{$Format}} = (
@@ -1362,34 +1461,37 @@ sub detectChanges()
             "SizeDelta"=>0
         );
     }
+    
     my (%AddedByDir, %RemovedByDir, %AddedByName,
     %RemovedByName, %AddedByPrefix, %RemovedByPrefix) = ();
+    
     foreach my $Name (sort keys(%{$PackageFiles{1}}))
     { # checking old files
         my $Format = getFormat($PackageFiles{1}{$Name});
         if(not defined $PackageFiles{2}{$Name})
         { # removed files
-            $RemovedFiles{$Name}=1;
-            $RemovedByDir{get_dirname($Name)}{$Name}=1;
-            $RemovedByName{get_filename($Name)}{$Name}=1;
-            foreach (get_Prefixes($Name, $MOVE_DEPTH)) {
+            $RemovedFiles{$Name} = 1;
+            $RemovedByDir{getDirname($Name)}{$Name} = 1;
+            $RemovedByName{getFilename($Name)}{$Name} = 1;
+            foreach (getPrefixes($Name, $MOVE_DEPTH)) {
                 $RemovedByPrefix{$_}{$Name} = 1;
             }
         }
         else {
-            $StableFiles{$Name}=1;
+            $StableFiles{$Name} = 1;
         }
     }
+    
     foreach my $Name (keys(%{$PackageFiles{2}}))
     { # checking new files
         my $Format = getFormat($PackageFiles{2}{$Name});
         if(not defined $PackageFiles{1}{$Name})
         { # added files
-            $AddedFiles{$Name}=1;
-            $AddedByDir{get_dirname($Name)}{$Name}=1;
-            $AddedByName{get_filename($Name)}{$Name}=1;
-            foreach (get_Prefixes($Name, $MOVE_DEPTH)) {
-                $AddedByPrefix{$_}{$Name}=1;
+            $AddedFiles{$Name} = 1;
+            $AddedByDir{getDirname($Name)}{$Name} = 1;
+            $AddedByName{getFilename($Name)}{$Name} = 1;
+            foreach (getPrefixes($Name, $MOVE_DEPTH)) {
+                $AddedByPrefix{$_}{$Name} = 1;
             }
         }
     }
@@ -1407,11 +1509,12 @@ sub detectChanges()
         }
         $FileChanges{$Format}{"Details"}{$Name}{"Status"} = "removed";
     }
-    foreach my $Name (sort {get_depth($b)<=>get_depth($a)} sort keys(%RemovedFiles))
+    
+    foreach my $Name (sort {getDepth($b)<=>getDepth($a)} sort keys(%RemovedFiles))
     { # checking moved files
         my $Format = getFormat($PackageFiles{1}{$Name});
         
-        my $FileName = get_filename($Name);
+        my $FileName = getFilename($Name);
         my @Removed = keys(%{$RemovedByName{$FileName}});
         my @Added = keys(%{$AddedByName{$FileName}});
         
@@ -1421,7 +1524,7 @@ sub detectChanges()
         if($#Added!=0 or $#Removed!=0)
         {
             my $Found = 0;
-            foreach my $Prefix (get_Prefixes($Name, $MOVE_DEPTH))
+            foreach my $Prefix (getPrefixes($Name, $MOVE_DEPTH))
             {
                 my @RemovedPrefix = keys(%{$RemovedByPrefix{$Prefix}});
                 my @AddedPrefix = keys(%{$AddedByPrefix{$Prefix}});
@@ -1440,6 +1543,7 @@ sub detectChanges()
                 next;
             }
         }
+        
         foreach my $File (@Added)
         {
             if($Format ne getFormat($PackageFiles{2}{$File}))
@@ -1457,6 +1561,7 @@ sub detectChanges()
             }
         }
     }
+    
     foreach my $Name (sort keys(%RemovedFiles))
     { # checking renamed files
         if(defined $MovedFiles{$Name})
@@ -1464,16 +1569,16 @@ sub detectChanges()
             next;
         }
         my $Format = getFormat($PackageFiles{1}{$Name});
-        my @Removed = keys(%{$RemovedByDir{get_dirname($Name)}});
-        my @Added = keys(%{$AddedByDir{get_dirname($Name)}});
+        my @Removed = keys(%{$RemovedByDir{getDirname($Name)}});
+        my @Added = keys(%{$AddedByDir{getDirname($Name)}});
         my $Match = 2;
         if($#Removed==0 and $#Added==0) {
             $Match *= 2;
         }
-        my $FName = get_filename($Name);
+        my $FName = getFilename($Name);
         my $Len = length($FName);
-        foreach my $File (sort {getBaseLen($FName, get_filename($b)) <=> getBaseLen($FName, get_filename($a))}
-        sort { abs(length(get_filename($a))-$Len) <=> abs(length(get_filename($b))-$Len) } @Added)
+        foreach my $File (sort {getBaseLen($FName, getFilename($b)) <=> getBaseLen($FName, getFilename($a))}
+        sort { abs(length(getFilename($a))-$Len) <=> abs(length(getFilename($b))-$Len) } @Added)
         {
             if($Format ne getFormat($PackageFiles{2}{$File}))
             { # different formats
@@ -1492,6 +1597,7 @@ sub detectChanges()
             }
         }
     }
+    
     foreach my $Name (sort (keys(%StableFiles), keys(%RenamedFiles), keys(%MovedFiles)))
     { # checking files
         my $Path = $PackageFiles{1}{$Name};
@@ -1548,11 +1654,13 @@ sub detectChanges()
             $Details{"Status"} = "unchanged";
             $Details{"Empty"} = 1;
             $Details{"Rate"} = 0;
+            $UnchangedFiles{$Name} = 1;
         }
         else
         {
             $Details{"Status"} = "unchanged";
             $Details{"Rate"} = 0;
+            $UnchangedFiles{$Name} = 1;
         }
         if($NewName = $RenamedFiles{$Name})
         { # renamed files
@@ -1588,6 +1696,7 @@ sub detectChanges()
         }
         %{$FileChanges{$Format}{"Details"}{$Name}} = %Details;
     }
+    
     foreach my $Name (keys(%AddedFiles))
     { # checking added files
         my $Path = $PackageFiles{2}{$Name};
@@ -1613,11 +1722,13 @@ sub detectChanges()
             "Size"=>0,
             "SizeDelta"=>0
         );
+        
         foreach my $Name (keys(%{$PackageDeps{1}{$Kind}}))
         {
             my $Size = length($Name);
             $DepChanges{$Kind}{"Total"} += 1;
             $DepChanges{$Kind}{"Size"} += $Size;
+            
             if(not defined($PackageDeps{2}{$Kind})
             or not defined($PackageDeps{2}{$Kind}{$Name}))
             { # removed deps
@@ -1626,6 +1737,7 @@ sub detectChanges()
                 $DepChanges{$Kind}{"SizeDelta"} += $Size;
                 next;
             }
+            
             my %Info1 = %{$PackageDeps{1}{$Kind}{$Name}};
             my %Info2 = %{$PackageDeps{2}{$Kind}{$Name}};
             if($Info1{"Op"} and $Info1{"V"}
@@ -1640,6 +1752,7 @@ sub detectChanges()
             }
         }
     }
+    
     foreach my $Kind (keys(%{$PackageDeps{2}}))
     { # added deps
         foreach my $Name (keys(%{$PackageDeps{2}{$Kind}}))
@@ -1696,8 +1809,10 @@ sub detectChanges()
     {
         my $Old = $PackageInfo{$Package}{"V1"};
         my $New = $PackageInfo{$Package}{"V2"};
+        
         my $OldSize = length($Old);
         my $NewSize = length($New);
+        
         $InfoChanges{"Total"} += 1;
         if($Old and not $New)
         {
@@ -1717,8 +1832,10 @@ sub detectChanges()
         {
             my $P1 = $TMP_DIR."/1/".$Package."-info";
             my $P2 = $TMP_DIR."/2/".$Package."-info";
+            
             writeFile($P1, $Old);
             writeFile($P2, $New);
+            
             my ($DLink, $Rate) = diffFiles($P1, $P2, getRPath("info-diffs", $Package."-info"));
             
             # clean space
@@ -1726,10 +1843,12 @@ sub detectChanges()
             rmtree($TMP_DIR."/2/");
             
             $DLink =~s/\A\Q$REPORT_DIR\E\///;
+            
             my %Details = ();
             $Details{"Status"} = "changed";
             $Details{"Rate"} = $Rate;
             $Details{"Diff"} = $DLink;
+            
             %{$InfoChanges{"Details"}{$Package}} = %Details;
             $InfoChanges{"Changed"} += 1;
             $InfoChanges{"Rate"} += $Rate;
@@ -1749,6 +1868,7 @@ sub detectChanges()
     $STAT_LINE .= "moved:".keys(%MovedFiles).";";
     $STAT_LINE .= "renamed:".keys(%RenamedFiles).";";
     $STAT_LINE .= "changed:".keys(%ChangedFiles).";";
+    $STAT_LINE .= "unchanged:".keys(%UnchangedFiles).";";
 }
 
 sub htmlSpecChars($)
@@ -1762,15 +1882,17 @@ sub htmlSpecChars($)
     return $Str;
 }
 
-sub get_Report_Usage()
+sub getReportUsage()
 {
     if(not keys(%PackageUsage)) {
         return "";
     }
+    
     my $Report = "<a name='Usage'></a>\n";
     $Report .= "<h2>Usage Analysis</h2><hr/>\n";
-    $Report .= "<table class='summary'>\n";
+    $Report .= "<table class='summary highlight'>\n";
     $Report .= "<tr><th>Package</th><th>Status</th><th>Used By</th></tr>\n";
+    
     foreach my $Package (sort keys(%PackageUsage))
     {
         my $Num = keys(%{$PackageUsage{$Package}{"UsedBy"}});
@@ -1795,18 +1917,21 @@ sub get_Report_Usage()
         $Report .= "</tr>\n";
     }
     $Report .= "</table>\n";
+    
     return $Report;
 }
 
-sub get_Report_Headers()
+sub getReportHeaders()
 {
     if(not keys(%PackageInfo)) {
         return "";
     }
+    
     my $Report = "<a name='Info'></a>\n";
     $Report .= "<h2>Changes In Package Info</h2><hr/>\n";
-    $Report .= "<table class='summary'>\n";
+    $Report .= "<table class='summary highlight'>\n";
     $Report .= "<tr><th>Package</th><th>Status</th><th>Delta</th><th>Visual Diff</th></tr>\n";
+    
     my %Details = %{$InfoChanges{"Details"}};
     foreach my $Package (sort keys(%Details))
     {
@@ -1828,8 +1953,8 @@ sub get_Report_Headers()
             if($Status eq "changed")
             {
                 $Report .= "<td class='warning'>changed</td>\n";
-                $Report .= "<td class='value'>".show_number($Details{$Package}{"Rate"}*100)."%</td>\n";
-                $Report .= "<td><a href='".$Details{$Package}{"Diff"}."' target=\'$LinksTarget\'>diff</a></td>\n"; # style='color:Blue;'
+                $Report .= "<td class='value'>".showNumber($Details{$Package}{"Rate"}*100)."%</td>\n";
+                $Report .= "<td><a href='".encodeUrl($Details{$Package}{"Diff"})."' target=\'$LinksTarget\'>diff</a></td>\n";
             }
             else
             {
@@ -1840,10 +1965,11 @@ sub get_Report_Headers()
         $Report .= "</tr>\n";
     }
     $Report .= "</table>\n";
+    
     return $Report;
 }
 
-sub get_Report_Deps()
+sub getReportDeps()
 {
     my $Report = "<a name='Deps'></a>\n";
     foreach my $Kind (sort keys(%DepChanges))
@@ -1853,7 +1979,7 @@ sub get_Report_Deps()
             next;
         }
         $Report .= "<h2>Changes In \"".ucfirst($Kind)."\" Dependencies</h2><hr/>\n";
-        $Report .= "<table class='summary'>\n";
+        $Report .= "<table class='summary highlight'>\n";
         $Report .= "<tr><th>Name</th><th>Status</th><th>Old<br/>Version</th><th>New<br/>Version</th></tr>\n";
         foreach my $Name (sort {lc($a) cmp lc($b)} @Names)
         {
@@ -1928,7 +2054,7 @@ sub createFileView($$$)
         return undef;
     }
     
-    my $Name = get_filename($File);
+    my $Name = getFilename($File);
     my $Content = readFile($Path);
     my $CssStyles = readModule("Styles", "View.css");
     
@@ -1942,20 +2068,20 @@ sub createFileView($$$)
     
     $Content = "<pre class='view'>".$Content."</pre>\n";
     
-    $Content = "<table cellspacing='0' cellpadding='0'>\n<tr>\n<td class='header'>\n".$Name."</td><td class='plain'><a href=\'$Name\'>plain</a></td>\n</tr>\n<tr>\n<td valign='top' colspan='2'>\n".$Content."</td>\n</tr>\n</table>\n";
-    $Content = composeHTML_Head($Name, "", "View file ".$File, $CssStyles, "")."\n<body>\n".$Content;
+    $Content = "<table cellspacing='0' cellpadding='0'>\n<tr>\n<td class='header'>\n".$Name."</td><td class='plain'><a href=\'".encodeUrl($Name)."\'>plain</a></td>\n</tr>\n<tr>\n<td valign='top' colspan='2'>\n".$Content."</td>\n</tr>\n</table>\n";
+    $Content = composeHTMLHead($Name, "", "View file ".$File, $CssStyles, "")."\n<body>\n".$Content;
     $Content .= "</body></html>";
     
     my $R = $Dir."/".$File."-view.html";
     writeFile($REPORT_DIR."/".$R, $Content);
     
     # plain copy
-    copy($Path, $REPORT_DIR."/".$Dir."/".get_dirname($File)."/");
+    copy($Path, $REPORT_DIR."/".$Dir."/".getDirname($File)."/");
     
     return $R;
 }
 
-sub get_Report_Files()
+sub getReportFiles()
 {
     my $Report = "";
     my $JSort = "title='sort' onclick='javascript:sort(this, 1)' style='cursor:pointer'";
@@ -1984,7 +2110,7 @@ sub get_Report_Files()
         
         $Report .= "<a name='".$FormatInfo{$Format}{"Anchor"}."'></a>\n";
         $Report .= "<h2>".$FormatInfo{$Format}{"Title"}." (".$FileChanges{$Format}{"Total"}.")</h2><hr/>\n";
-        $Report .= "<table class='summary'>\n";
+        $Report .= "<table class='summary highlight'>\n";
         $Report .= "<tr>\n";
         $Report .= "<th $JSort>Name</th>\n";
         $Report .= "<th $JSort>Status</th>\n";
@@ -2048,16 +2174,16 @@ sub get_Report_Files()
             if(defined $ListAddedRemoved
             and $Info{"Status"}=~/added|removed/)
             {
-                my $FN = get_filename($ShowFile);
+                my $FN = getFilename($ShowFile);
                 if($Info{"Status"} eq "added")
                 {
-                    if(my $View = createFileView($File, 2, "view/added")) {
+                    if(my $View = encodeUrl(createFileView($File, 2, "view/added"))) {
                         $ShowFile=~s&(\A|/)(\Q$FN\E)\Z&$1<a href=\'$View\' target=\'$LinksTarget\' title='View file'>$2</a>&;
                     }
                 }
                 elsif($Info{"Status"} eq "removed")
                 {
-                    if(my $View = createFileView($File, 1, "view/removed")) {
+                    if(my $View = encodeUrl(createFileView($File, 1, "view/removed"))) {
                         $ShowFile=~s&(\A|/)(\Q$FN\E)\Z&$1<a href=\'$View\' target=\'$LinksTarget\' title='View file'>$2</a>&;
                     }
                 }
@@ -2090,13 +2216,13 @@ sub get_Report_Files()
             {
                 if(not $QuickMode and not $Info{"Skipped"}
                 and $Info{"Status"}=~/\A(changed|moved|renamed)\Z/) {
-                    $Report .= "<td class='value'$Join>".show_number($Info{"Rate"}*100)."%</td>\n";
+                    $Report .= "<td class='value'$Join>".showNumber($Info{"Rate"}*100)."%</td>\n";
                 }
                 else {
                     $Report .= "<td$Join></td>\n";
                 }
                 if(my $Link = $Info{"Diff"}) {
-                    $Report .= "<td$Join><a href='".$Link."' target=\'$LinksTarget\'>diff</a></td>\n"; # style='color:Blue;'
+                    $Report .= "<td$Join><a href='".encodeUrl($Link)."' target=\'$LinksTarget\'>diff</a></td>\n";
                 }
                 elsif($Info{"Empty"}) {
                     $Report .= "<td$Join></td>\n";
@@ -2111,7 +2237,7 @@ sub get_Report_Files()
                 if($ShowDetails)
                 {
                     if(my $Link = $Info{"Report"}) {
-                        $Report .= "<td$Join><a href='".$Link."' target=\'$LinksTarget\'>report</a></td>\n"; # style='color:Blue;'
+                        $Report .= "<td$Join><a href='".encodeUrl($Link)."' target=\'$LinksTarget\'>report</a></td>\n";
                     }
                     else {
                         $Report .= "<td$Join></td>\n";
@@ -2127,7 +2253,7 @@ sub get_Report_Files()
                             my $Link1 = $Info{"ABIDump"}{1};
                             my $Link2 = $Info{"ABIDump"}{2};
                             
-                            $Report .= "<td$Join><a href='".$Link1."' target=\'$LinksTarget\'>1</a>, <a href='".$Link2."' target=\'$LinksTarget\'>2</a></td>\n"; # style='color:Blue;'
+                            $Report .= "<td$Join><a href='".encodeUrl($Link1)."' target=\'$LinksTarget\'>1</a>, <a href='".encodeUrl($Link2)."' target=\'$LinksTarget\'>2</a></td>\n";
                         }
                         else {
                             $Report .= "<td$Join></td>\n";
@@ -2139,7 +2265,7 @@ sub get_Report_Files()
                                 my $Link1 = $Info{"DWARFDump"}{1};
                                 my $Link2 = $Info{"DWARFDump"}{2};
                                 
-                                $Report .= "<td$Join><a href='".$Link1."' target=\'$LinksTarget\'>1</a>, <a href='".$Link2."' target=\'$LinksTarget\'>2</a></td>\n"; # style='color:Blue;'
+                                $Report .= "<td$Join><a href='".encodeUrl($Link1)."' target=\'$LinksTarget\'>1</a>, <a href='".encodeUrl($Link2)."' target=\'$LinksTarget\'>2</a></td>\n";
                             }
                             else {
                                 $Report .= "<td$Join></td>\n";
@@ -2161,25 +2287,14 @@ sub get_Report_Files()
     return $Report;
 }
 
-sub appendFile($$)
-{
-    my ($Path, $Content) = @_;
-    return if(not $Path);
-    if(my $Dir = get_dirname($Path)) {
-        mkpath($Dir);
-    }
-    open(FILE, ">>", $Path) || die ("can't open file \'$Path\': $!\n");
-    print FILE $Content;
-    close(FILE);
-}
-
 sub writeFile($$)
 {
     my ($Path, $Content) = @_;
-    return if(not $Path);
-    if(my $Dir = get_dirname($Path)) {
+    
+    if(my $Dir = getDirname($Path)) {
         mkpath($Dir);
     }
+    
     open(FILE, ">", $Path) || die ("can't open file \'$Path\': $!\n");
     print FILE $Content;
     close(FILE);
@@ -2188,15 +2303,16 @@ sub writeFile($$)
 sub readFile($)
 {
     my $Path = $_[0];
-    return "" if(not $Path or not -f $Path);
+    
     open(FILE, "<", $Path);
     local $/ = undef;
     my $Content = <FILE>;
     close(FILE);
+    
     return $Content;
 }
 
-sub get_Prefixes($$)
+sub getPrefixes($$)
 {
     my @Parts = split(/[\/]+/, $_[0]);
     my $Prefix = $Parts[$#Parts];
@@ -2212,7 +2328,7 @@ sub get_Prefixes($$)
     return @Res;
 }
 
-sub get_filename($)
+sub getFilename($)
 { # much faster than basename() from File::Basename module
     if($_[0]=~/([^\/]+)[\/]*\Z/) {
         return $1;
@@ -2220,7 +2336,7 @@ sub get_filename($)
     return "";
 }
 
-sub get_dirname($)
+sub getDirname($)
 { # much faster than dirname() from File::Basename module
     if($_[0]=~/\A(.*?)[\/]+[^\/]*[\/]*\Z/) {
         return $1;
@@ -2228,8 +2344,8 @@ sub get_dirname($)
     return "";
 }
 
-sub separate_path($) {
-    return (get_dirname($_[0]), get_filename($_[0]));
+sub sepPath($) {
+    return (getDirname($_[0]), getFilename($_[0]));
 }
 
 sub exitStatus($$)
@@ -2256,16 +2372,21 @@ sub printMsg($$)
     }
 }
 
-sub cut_path_prefix($$)
+sub cutPathPrefix($$)
 {
     my ($Path, $Prefix) = @_;
-    return $Path if(not $Prefix);
+    
+    if(not $Prefix) {
+        return $Path;
+    }
+    
     $Prefix=~s/[\/]+\Z//;
     $Path=~s/\A\Q$Prefix\E([\/]+|\Z)//;
+    
     return $Path;
 }
 
-sub get_abs_path($)
+sub getAbsPath($)
 { # abs_path() should NOT be called for absolute inputs
   # because it can change them (symlinks)
     my $Path = $_[0];
@@ -2275,19 +2396,37 @@ sub get_abs_path($)
     return $Path;
 }
 
-sub cmd_find($;$$$$)
+sub cmdFind(@)
 {
-    my ($Path, $Type, $Name, $MaxDepth, $UseRegex) = @_;
-    return () if(not $Path or not -e $Path);
-    if(not check_Cmd("find")) {
+    if(not checkCmd("find")) {
         exitStatus("Not_Found", "can't find a \"find\" command");
     }
-    $Path = get_abs_path($Path);
+    
+    my $Path = shift(@_);
+    
+    my ($Type, $Name, $MaxDepth, $UseRegex) = ();
+    
+    if(@_) {
+        $Type = shift(@_);
+    }
+    if(@_) {
+        $Name = shift(@_);
+    }
+    if(@_) {
+        $MaxDepth = shift(@_);
+    }
+    if(@_) {
+        $UseRegex = shift(@_);
+    }
+    
+    $Path = getAbsPath($Path);
+    
     if(-d $Path and -l $Path
     and $Path!~/\/\Z/)
     { # for directories that are symlinks
-        $Path.="/";
+        $Path .= "/";
     }
+    
     my $Cmd = "find \"$Path\"";
     if($MaxDepth) {
         $Cmd .= " -maxdepth $MaxDepth";
@@ -2299,15 +2438,18 @@ sub cmd_find($;$$$$)
     { # wildcards
         $Cmd .= " -name \"$Name\"";
     }
+    
     my $Res = `$Cmd 2>\"$TMP_DIR/null\"`;
     if($?) {
         printMsg("ERROR", "problem with \'find\' utility ($?): $!");
     }
+    
     my @Files = split(/\n/, $Res);
     if($Name and $UseRegex)
     { # regex
         @Files = grep { /\A$Name\Z/ } @Files;
     }
+    
     return @Files;
 }
 
@@ -2319,8 +2461,10 @@ sub generateTemplate()
 
 sub isSCM_File($)
 { # .svn, .git, .bzr, .hg and CVS
-    my ($Dir, $Name) = separate_path($_[0]);
-    if($Dir=~/(\A|[\/\\]+)\.(svn|git|bzr|hg)([\/\\]+|\Z)/) {
+    my $Dir = getDirname($_[0]);
+    my $Name = getFilename($_[0]);
+    
+    if($Dir=~/(\A|[\/\\])\.(svn|git|bzr|hg)([\/\\]|\Z)/) {
         return uc($2);
     }
     elsif($Name=~/\A\.(git|cvs|hg).*/)
@@ -2328,10 +2472,11 @@ sub isSCM_File($)
       # .cvsignore
         return uc($1);
     }
-    elsif($Dir=~/(\A|[\/\\]+)(CVS)([\/\\]+|\Z)/) {
-        return uc($2);
+    elsif($Dir=~/(\A|[\/\\])(CVS)([\/\\]|\Z)/) {
+        return "cvs";
     }
-    return "";
+    
+    return undef;
 }
 
 sub identifyFile($$)
@@ -2371,37 +2516,42 @@ sub identifyFile($$)
 sub getFormat($)
 {
     my $Path = $_[0];
-    return "" if(not $Path);
+    
     if(defined $Cache{"getFormat"}{$Path}) {
         return $Cache{"getFormat"}{$Path};
     }
-    my $Format = getFormat_($Path);
+    my $Format = getFormat_I($Path);
     
     if($Format=~/\A(OTHER|INFORM|DATA|TEXT)\Z/)
     { # by directory
-        if(my $Dir = get_dirname($PathName{$Path}))
+        if(my $Dir = getDirname($PathName{$Path}))
         {
             my $ID = undef;
+            
             # by dir
-            foreach (reverse(split(/\//, $Dir)))
+            foreach my $SDir (reverse(split(/\//, $Dir)))
             {
-                if($ID = $DirFormat{$_})
+                if($ID = $DirFormat{$SDir})
                 {
                     $Format = $ID;
                     last;
                 }
             }
+            
             if(not defined $ID)
             {
                 # by subdir
-                foreach (keys(%DirFormat))
+                foreach my $SDir (keys(%DirFormat))
                 {
-                    next if(index($_, "/")==-1);
-                    if(index($Dir, $_)!=-1)
+                    if(index($SDir, "/")==-1) {
+                        next;
+                    }
+                    
+                    if(index($Dir, $SDir)!=-1)
                     {
-                        if($Dir=~/(\A|\/)\Q$_\E(\/|\Z)/)
+                        if($Dir=~/(\A|\/)\Q$SDir\E(\/|\Z)/)
                         {
-                            $Format = $DirFormat{$_};
+                            $Format = $DirFormat{$SDir};
                             last;
                         }
                     }
@@ -2502,29 +2652,41 @@ sub getFormat($)
         $Format = "OTHER";
     }
     
+    if($Format eq "OTHER")
+    {
+        if($AllText) {
+            $Format = "TEXT";
+        }
+    }
+    
     return ($Cache{"getFormat"}{$Path}=$Format);
 }
 
-sub getFormat_($)
+sub getFormat_I($)
 {
     my $Path = $_[0];
-    my ($Dir, $Name) = separate_path($Path);
+    
+    my $Dir = getDirname($Path);
+    my $Name = getFilename($Path);
+    
     $Name=~s/\~\Z//g; # backup files
+    
     if(-l $Path) {
         return "SYMLINK";
     }
     elsif(-d $Path) {
         return "DIR";
     }
-    elsif(my $ID = identifyFile(get_filename($Path), "Name"))
+    elsif(my $ID = identifyFile($Name, "Name"))
     { # check by exact name (case sensitive)
         return $ID;
     }
-    elsif(my $ID2 = identifyFile(get_filename($Path), "iName"))
+    elsif(my $ID2 = identifyFile($Name, "iName"))
     { # check by exact name (case insensitive)
         return $ID2;
     }
-    elsif(my $Kind = isSCM_File($Path)) {
+    elsif($Path=~/svn|git|bzr|hg|cvs/i
+    and my $Kind = isSCM_File($Path)) {
         return $Kind;
     }
     elsif($Name!~/\.(\w+)\Z/i
@@ -2565,7 +2727,7 @@ sub getFormat_($)
     and $Dir=~/\/(man\d*|manpages)(\/|\Z)/)
     or ($Name=~/\.(\d+)\Z/i and $Dir=~/\/(doc|docs|src|libs|utils)(\/|\Z)/)
     or $Name=~/\.(man)\Z/
-    or ($Name=~/[a-z]{3,}\.(\d+)\Z/i and $Name!~/\.($ARCHIVE_EXT)\./i))
+    or ($Name=~/[a-z]{3,}\.(\d+)\Z/i and $Name!~/\.($ARCHIVE_EXT)\./i and $Dir!~/log/i))
     { # harmattan/manpages/uic.1
       # t1utils-1.36/t1asm.1
         return "MANPAGE";
@@ -2587,13 +2749,16 @@ sub getFormat_($)
     elsif($Name=~/\A(CMakeLists.*\.txt)\Z/i) {
         return "CMAKE";
     }
-    elsif(my $ID3 = identifyFile(get_filename($Path), "Ext"))
+    elsif(my $ID3 = identifyFile($Name, "Ext"))
     { # check by extension (case sensitive)
         return $ID3;
     }
-    elsif(my $ID4 = identifyFile(get_filename($Path), "iExt"))
+    elsif(my $ID4 = identifyFile($Name, "iExt"))
     { # check by extension (case insensitive)
         return $ID4;
+    }
+    elsif(substr($Name, 0, 1) eq ".") {
+        return "HIDDEN";
     }
     return "OTHER";
 }
@@ -2632,7 +2797,7 @@ sub parseTag($$)
 sub readDescriptor($$)
 {
     my ($Version, $Path) = @_;
-    return if(not -f $Path);
+    
     my $Content = readFile($Path);
     if(not $Content) {
         exitStatus("Error", "XML-descriptor is empty");
@@ -2643,13 +2808,13 @@ sub readDescriptor($$)
     $Content=~s/\/\*(.|\n)+?\*\///g;
     $Content=~s/<\!--(.|\n)+?-->//g;
     if(my $GV = parseTag(\$Content, "version")) {
-        $Group{"V$Version"} = $GV;
+        $Group{"V".$Version} = $GV;
     }
     else {
         exitStatus("Error", "version in the XML-descriptor is not specified (<version> section)");
     }
     if(my $GN = parseTag(\$Content, "group")) {
-        $Group{"Name$Version"} = $GN;
+        $Group{"Name".$Version} = $GN;
     }
     else {
         exitStatus("Error", "group name in the XML-descriptor is not specified (<group> section)");
@@ -2663,14 +2828,14 @@ sub readDescriptor($$)
             }
             if(-d $Path)
             {
-                my @Files = cmd_find($Path, "f", "*.rpm");
-                @Files = (@Files, cmd_find($Path, "f", "*.src.rpm"));
+                my @Files = cmdFind($Path, "f", "*.rpm");
+                @Files = (@Files, cmdFind($Path, "f", "*.src.rpm"));
                 if(not @Files)
                 { # search for DEBs
-                    @Files = (@Files, cmd_find($Path, "f", "*.deb"));
+                    @Files = (@Files, cmdFind($Path, "f", "*.deb"));
                 }
-                foreach (@Files) {
-                    registerPackage($_, $Version);
+                foreach my $F (@Files) {
+                    registerPackage($F, $Version);
                 }
             }
             else {
@@ -2708,9 +2873,8 @@ sub classifyPath($)
 sub skipFileCompare($$)
 {
     my ($Path, $Version) = @_;
-    return 0 if(not $Path or not $Version);
     
-    my $Name = get_filename($Path);
+    my $Name = getFilename($Path);
     if($SkipFiles{$Version}{"Name"}{$Name}) {
         return 1;
     }
@@ -2742,9 +2906,8 @@ sub sepDep($)
         $V=~s/\A[^\-\:]+\://;# cut prefix (1:)
         return ($N, $O, $V);
     }
-    else {
-        return ($Dep, "", "");
-    }
+    
+    return ($Dep, "", "");
 }
 
 sub registerPackage(@)
@@ -2755,20 +2918,7 @@ sub registerPackage(@)
         return ();
     }
     
-    if($CompareDirs)
-    {
-        if(not -d $Path) {
-            return ();
-        }
-    }
-    else
-    {
-        if(not -f $Path) {
-            return ();
-        }
-    }
-    
-    my $PkgName = get_filename($Path);
+    my $PkgName = getFilename($Path);
     my $PkgFormat = getFormat($Path);
     
     my ($CPath, $Attr) = ();
@@ -2784,10 +2934,11 @@ sub registerPackage(@)
     $TargetPackages{$Version}{$PkgName} = 1;
     $Group{"Count$Version"} += 1;
     
-    my @Files = cmd_find($CPath);
+    # search for all files
+    my @Files = cmdFind($CPath);
     foreach my $File (sort @Files)
-    { # search for all files
-        my $FName = cut_path_prefix($File, $CPath);
+    {
+        my $FName = cutPathPrefix($File, $CPath);
         if($PkgFormat eq "RPM"
         or $PkgFormat eq "DEB")
         { # files installed to the system
@@ -2795,9 +2946,9 @@ sub registerPackage(@)
         }
         elsif($PkgFormat eq "ARCHIVE")
         {
-            if($RemovePrefix{$Version})
+            if(my $RmPrefix = $RemovePrefix{$Version})
             { # cut common prefix from all files
-                $FName = cut_path_prefix($FName, $RemovePrefix{$Version});
+                $FName = cutPathPrefix($FName, $RmPrefix);
             }
         }
         if(not $FName) {
@@ -2814,20 +2965,23 @@ sub registerPackage(@)
         $PackageFiles{$Version}{$FName} = $File;
         $PathName{$File} = $FName;
         
-        if(not get_dirname($FName)
-        and getFormat($File) eq "ARCHIVE"
-        and not defined $SkipSubArchives)
+        if(not defined $CompareDirs
+        and not defined $SkipSubArchives
+        and not getDirname($FName)
+        and getFormat($File) eq "ARCHIVE")
         { # go into archives (for SRPM)
             my $SubDir = "$TMP_DIR/xcontent$Version/$FName";
             unpackArchive($File, $SubDir);
+            
             my @SubContents = listDir($SubDir);
             if($#SubContents==0 and -d $SubDir."/".$SubContents[0])
             { # libsample-x.y.z.tar.gz/libsample-x.y.z
                 $SubDir .= "/".$SubContents[0];
             }
-            foreach my $SubFile (cmd_find($SubDir))
+            
+            foreach my $SubFile (cmdFind($SubDir))
             { # search for all files in archive
-                my $SFName = cut_path_prefix($SubFile, $SubDir);
+                my $SFName = cutPathPrefix($SubFile, $SubDir);
                 if(not $SFName) {
                     next;
                 }
@@ -2843,10 +2997,13 @@ sub registerPackage(@)
             }
         }
     }
+    
     delete($PackageFiles{$Version}{"/"});
+    
     if($CheckUsage) {
         checkUsage($Attr->{"Name"});
     }
+    
     return $Attr;
 }
 
@@ -2866,24 +3023,29 @@ sub checkUsage($)
 sub listDir($)
 {
     my $Path = $_[0];
-    return () if(not $Path or not -d $Path);
+    
     opendir(my $DH, $Path);
-    return () if(not $DH);
+    
+    if(not $DH)
+    { # error
+        return ();
+    }
+    
     my @Contents = grep { $_ ne "." && $_ ne ".." } readdir($DH);
     return @Contents;
 }
 
 sub getArchiveFormat($)
 {
-    my $Pkg = get_filename($_[0]);
+    my $Pkg = getFilename($_[0]);
     foreach (sort {length($b)<=>length($a)} keys(%ArchiveFormats))
     {
         my $P = $ArchiveFormats{$_};
-        if($Pkg=~/\.($P)(|\.\d+)\Z/) {
+        if($Pkg=~/\.($P)(|\.\d+)\Z/i) {
             return $_;
         }
     }
-    return "";
+    return undef;
 }
 
 sub unpackArchive($$)
@@ -2893,24 +3055,23 @@ sub unpackArchive($$)
     my $Format = getArchiveFormat($Pkg);
     if(not $Format)
     {
-        printMsg("ERROR", "can't determine format of archive \'".get_filename($Pkg)."\'");
+        printMsg("ERROR", "can't determine format of archive \'".getFilename($Pkg)."\'");
         return 1;
     }
     
-    my $Cmd = "";
-    mkpath($OutDir);
+    my $Cmd = undef;
     
     if($Format=~/TAR\.\w+/i or $Format eq "TAR") {
         $Cmd = "tar -xf \"$Pkg\" --directory=\"$OutDir\"";
     }
     elsif($Format eq "GZ") {
-        $Cmd = "cp -f \"$Pkg\" \"$OutDir\" && cd \"$OutDir\" && gunzip \"".get_filename($Pkg)."\"";
+        $Cmd = "cp -f \"$Pkg\" \"$OutDir\" && cd \"$OutDir\" && gunzip \"".getFilename($Pkg)."\"";
     }
     elsif($Format eq "LZMA") {
-        $Cmd = "cp -f \"$Pkg\" \"$OutDir\" && cd \"$OutDir\" && unlzma \"".get_filename($Pkg)."\"";
+        $Cmd = "cp -f \"$Pkg\" \"$OutDir\" && cd \"$OutDir\" && unlzma \"".getFilename($Pkg)."\"";
     }
     elsif($Format eq "XZ") {
-        $Cmd = "cp -f \"$Pkg\" \"$OutDir\" && cd \"$OutDir\" && unxz \"".get_filename($Pkg)."\"";
+        $Cmd = "cp -f \"$Pkg\" \"$OutDir\" && cd \"$OutDir\" && unxz \"".getFilename($Pkg)."\"";
     }
     elsif($Format eq "ZIP") {
         $Cmd = "unzip -o \"$Pkg\" -d \"$OutDir\"";
@@ -2918,11 +3079,26 @@ sub unpackArchive($$)
     elsif($Format eq "JAR") {
         $Cmd = "cd \"$OutDir\" && jar -xf \"$Pkg\"";
     }
-    else {
-        return 1;
+    elsif($Format eq "APK") {
+        $Cmd = "apktool d -f -o \"$OutDir\" \"$Pkg\"";
+
+        if(not defined $SkipPattern) {
+            $SkipPattern = "apktool.yml|original\/META-INF";
+        }
+        elsif(not $SkipPattern=~m/apktool.yml|original\/META-INF/) {
+            $SkipPattern = "apktool.yml|original\/META-INF|$SkipPattern";
+        }
     }
     
-    system($Cmd." >$TMP_DIR/output 2>&1");
+    if($Cmd)
+    {
+        mkpath($OutDir);
+        my $TmpFile = $TMP_DIR."/output";
+        qx/$Cmd >$TmpFile 2>&1/;
+        return 0;
+    }
+    
+    return 1;
 }
 
 sub readPackage($$)
@@ -2933,35 +3109,21 @@ sub readPackage($$)
         return ();
     }
     
-    if($CompareDirs)
-    {
-        if(not -d $Path) {
-            return ();
-        }
-    }
-    else
-    {
-        if(not -f $Path) {
-            return ();
-        }
-    }
-    
-    my $CDir = "$TMP_DIR/content$Version";
-    my $CPath = $CDir."/".get_filename($Path);
-    
-    my %Attributes = ();
     my $Format = getFormat($Path);
     
     if($CompareDirs and $Format eq "DIR")
     {
-        mkpath($CDir);
-        qx/cp -fr $Path $CDir/;
-        
-        return ($CDir."/".get_filename($Path), {});
+        return ($Path, {});
     }
-    elsif($Format eq "DEB")
+    
+    my $CDir = "$TMP_DIR/content$Version";
+    my $CPath = $CDir."/".getFilename($Path);
+    
+    my %Attr = ();
+    
+    if($Format eq "DEB")
     { # Deb package
-        if(not check_Cmd("dpkg-deb")) {
+        if(not checkCmd("dpkg-deb")) {
             exitStatus("Not_Found", "can't find \"dpkg-deb\"");
         }
         mkpath($CPath);
@@ -2969,18 +3131,18 @@ sub readPackage($$)
         if($?) {
             exitStatus("Error", "can't extract package v$Version");
         }
-        if(not check_Cmd("dpkg")) {
+        if(not checkCmd("dpkg")) {
             exitStatus("Not_Found", "can't find \"dpkg\"");
         }
         my $Info = `dpkg -f $Path`;
         if($Info=~/Version\s*:\s*(.+)/) {
-            $Attributes{"Version"} = $1;
+            $Attr{"Version"} = $1;
         }
         if($Info=~/Package\s*:\s*(.+)/) {
-            $Attributes{"Name"} = $1;
+            $Attr{"Name"} = $1;
         }
         if($Info=~/Architecture\s*:\s*(.+)/) {
-            $Attributes{"Arch"} = $1;
+            $Attr{"Arch"} = $1;
         }
         foreach my $Kind ("Depends", "Provides")
         {
@@ -2994,16 +3156,16 @@ sub readPackage($$)
                 }
             }
         }
-        $PackageInfo{$Attributes{"Name"}}{"V$Version"} = $Info;
+        $PackageInfo{$Attr{"Name"}}{"V$Version"} = $Info;
         $Group{"Format"}{$Format} = 1;
     }
     elsif($Format eq "RPM" or $Format eq "SRPM")
     { # RPM or SRPM package
-        if(not check_Cmd("rpm"))
+        if(not checkCmd("rpm"))
         { # rpm and rpm2cpio
             exitStatus("Not_Found", "can't find \"rpm\"");
         }
-        if(not check_Cmd("cpio")) {
+        if(not checkCmd("cpio")) {
             exitStatus("Not_Found", "can't find \"cpio\"");
         }
         mkpath($CPath);
@@ -3011,10 +3173,10 @@ sub readPackage($$)
         if($?) {
             exitStatus("Error", "can't extract package v$Version");
         }
-        ($Attributes{"Version"}, $Attributes{"Release"},
-        $Attributes{"Name"}, $Attributes{"Arch"}) = split(",", queryRPM($Path, "--queryformat \%{version},\%{release},\%{name},\%{arch}"));
-        if($Attributes{"Release"}) {
-            $Attributes{"Version"} .= "-".$Attributes{"Release"};
+        ($Attr{"Version"}, $Attr{"Release"},
+        $Attr{"Name"}, $Attr{"Arch"}) = split(",", queryRPM($Path, "--queryformat \%{version},\%{release},\%{name},\%{arch}"));
+        if($Attr{"Release"}) {
+            $Attr{"Version"} .= "-".$Attr{"Release"};
         }
         foreach my $Kind ("requires", "provides", "suggests")
         {
@@ -3025,30 +3187,30 @@ sub readPackage($$)
                 $TotalDeps{$Kind." ".$N} = 1;
             }
         }
-        $PackageInfo{$Attributes{"Name"}}{"V$Version"} = queryRPM($Path, "--info");
+        $PackageInfo{$Attr{"Name"}}{"V$Version"} = queryRPM($Path, "--info");
         $Group{"Format"}{$Format} = 1;
     }
     elsif($Format eq "ARCHIVE")
     { # TAR.GZ and others
         if(unpackArchive(abs_path($Path), $CPath)!=0) {
-            exitStatus("Error", "can't extract package \'".get_filename($Path)."\'");
+            exitStatus("Error", "can't extract package \'".getFilename($Path)."\'");
         }
         
-        if(my ($N, $V) = parseVersion(get_filename($Path))) {
-            ($Attributes{"Name"}, $Attributes{"Version"}) = ($N, $V);
+        if(my ($N, $V) = parseVersion(getFilename($Path))) {
+            ($Attr{"Name"}, $Attr{"Version"}) = ($N, $V);
         }
-        if(not $Attributes{"Version"})
+        if(not $Attr{"Version"})
         { # default version
-            $Attributes{"Version"} = $Version==1?"X":"Y";
+            $Attr{"Version"} = $Version==1?"X":"Y";
         }
-        if(not $Attributes{"Name"})
+        if(not $Attr{"Name"})
         { # default name
-            $Attributes{"Name"} = get_filename($Path);
-            $Attributes{"Name"}=~s/\.($ARCHIVE_EXT)\Z//;
+            $Attr{"Name"} = getFilename($Path);
+            $Attr{"Name"}=~s/\.($ARCHIVE_EXT)\Z//;
         }
         $Group{"Format"}{uc(getExt($Path))} = 1;
     }
-    return ($CPath, \%Attributes);
+    return ($CPath, \%Attr);
 }
 
 sub parseVersion($)
@@ -3100,13 +3262,14 @@ sub queryRPM($$)
     return `rpm -qp $Query \"$Path\" 2>$TMP_DIR/null`;
 }
 
-sub composeHTML_Head($$$$$)
+sub composeHTMLHead($$$$$)
 {
     my ($Title, $Keywords, $Description, $Styles, $Scripts) = @_;
     return "<!DOCTYPE html PUBLIC \"-//W3C//DTD XHTML 1.0 Transitional//EN\" \"http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd\">
     <html xmlns=\"http://www.w3.org/1999/xhtml\" xml:lang=\"en\" lang=\"en\">
     <head>
     <meta http-equiv=\"Content-Type\" content=\"text/html; charset=utf-8\" />
+    <meta name=\"viewport\" content=\"width=device-width,initial-scale=1\" />
     <meta name=\"keywords\" content=\"$Keywords\" />
     <meta name=\"description\" content=\"$Description\" />
     <title>
@@ -3123,7 +3286,7 @@ sub composeHTML_Head($$$$$)
     </head>";
 }
 
-sub get_Title()
+sub getTitle()
 {
     if($TargetTitle) {
         return $TargetTitle;
@@ -3132,7 +3295,7 @@ sub get_Title()
     return $Group{"Name"};
 }
 
-sub get_Header()
+sub getHeader()
 {
     my $Header = "";
     
@@ -3141,11 +3304,11 @@ sub get_Header()
         $Header = "Changes report between <span style='color:Blue;'>".$Group{"Name1"}."/</span> and <span style='color:Blue;'>".$Group{"Name2"}."/</span> directories";
     }
     elsif($CheckMode eq "Group") {
-        $Header = "Changes report for the <span style='color:Blue;'>".get_Title()."</span> group of packages between <span style='color:Red;'>".$Group{"V1"}."</span> and <span style='color:Red;'>".$Group{"V2"}."</span> versions";
+        $Header = "Changes report for the <span style='color:Blue;'>".getTitle()."</span> group of packages between <span style='color:Red;'>".$Group{"V1"}."</span> and <span style='color:Red;'>".$Group{"V2"}."</span> versions";
     }
     else
     { # single package
-        $Header = "Changes report for the <span style='color:Blue;'>".get_Title()."</span> package between <span style='color:Red;'>".$Group{"V1"}."</span> and <span style='color:Red;'>".$Group{"V2"}."</span> versions";
+        $Header = "Changes report for the <span style='color:Blue;'>".getTitle()."</span> package between <span style='color:Red;'>".$Group{"V1"}."</span> and <span style='color:Red;'>".$Group{"V2"}."</span> versions";
     }
     
     if($HideUnchanged) {
@@ -3155,16 +3318,16 @@ sub get_Header()
     return "<h1>".$Header."</h1>";
 }
 
-sub show_number($)
+sub showNumber($)
 {
     if($_[0])
     {
-        my $Num = cut_off_number($_[0], 2, 0);
+        my $Num = cutNumber($_[0], 2, 0);
         if($Num eq "0")
         {
             foreach my $P (3 .. 7)
             {
-                $Num = cut_off_number($_[0], $P, 1);
+                $Num = cutNumber($_[0], $P, 1);
                 if($Num ne "0") {
                     last;
                 }
@@ -3178,7 +3341,7 @@ sub show_number($)
     return $_[0];
 }
 
-sub cut_off_number($$$)
+sub cutNumber($$$)
 {
     my ($num, $digs_to_cut, $z) = @_;
     if($num!~/\./)
@@ -3204,10 +3367,10 @@ sub cut_off_number($$$)
     return $num;
 }
 
-sub get_Summary()
+sub getSummary()
 {
     my $TestInfo = "<h2>Test Info</h2><hr/>\n";
-    $TestInfo .= "<table class='summary'>\n";
+    $TestInfo .= "<table class='summary highlight'>\n";
     
     if(not $CompareDirs or $TargetName)
     {
@@ -3215,7 +3378,7 @@ sub get_Summary()
             $TestInfo .= "<tr><th class='left'>Group Name</th><td>".$Group{"Name"}."</td></tr>\n";
         }
         else {
-            $TestInfo .= "<tr><th class='left'>Package Name</th><td>".get_Title()."</td></tr>\n";
+            $TestInfo .= "<tr><th class='left'>Package Name</th><td>".getTitle()."</td></tr>\n";
         }
     }
     
@@ -3236,7 +3399,7 @@ sub get_Summary()
     $TestInfo .= "</table>\n";
 
     my $TestResults = "<h2>Test Results</h2><hr/>\n";
-    $TestResults .= "<table class='summary'>\n";
+    $TestResults .= "<table class='summary highlight'>\n";
     
     if(not $CompareDirs)
     {
@@ -3269,7 +3432,7 @@ sub get_Summary()
     
     my ($TotalChanged, $Total) = (0, 0);
     # Files
-    foreach my $Format (keys(%FileChanges))
+    foreach my $Format (sort keys(%FileChanges))
     {
         $TotalChanged += $FileChanges{$Format}{"SizeDelta"};
         $Total += $FileChanges{$Format}{"Size"};
@@ -3288,7 +3451,7 @@ sub get_Summary()
     if($Total) {
         $Affected = 100*$TotalChanged/$Total;
     }
-    $Affected = show_number($Affected);
+    $Affected = showNumber($Affected);
     if($Affected>=100) {
         $Affected = 100;
     }
@@ -3311,14 +3474,14 @@ sub get_Summary()
     if(defined $ABI_Change{"Total"})
     {
         $TestResults .= "<h2>ABI Status</h2><hr/>\n";
-        $TestResults .= "<table class='summary'>\n";
+        $TestResults .= "<table class='summary highlight'>\n";
         $TestResults .= "<tr><th class='left'>Total Objects<br/>(with debug-info)</th><td>".$ABI_Change{"Total"}."</td></tr>\n";
         my $Status = $ABI_Change{"Bin"}/$ABI_Change{"Total"};
         if($Status==100) {
             $TestResults .= "<tr><th class='left'>ABI Compatibility</th><td><span style='color:Green;'><b>100%</b></span></td></tr>\n";
         }
         else {
-            $TestResults .= "<tr><th class='left'>ABI Compatibility</th><td><span style='color:Red;'><b>".show_number(100-$Status)."%</b></span></td></tr>\n";
+            $TestResults .= "<tr><th class='left'>ABI Compatibility</th><td><span style='color:Red;'><b>".showNumber(100-$Status)."%</b></span></td></tr>\n";
         }
         $TestResults .= "</table>\n";
     }
@@ -3327,7 +3490,7 @@ sub get_Summary()
     
     if(keys(%TotalFiles))
     {
-        $FileChgs .= "<table class='summary'>\n";
+        $FileChgs .= "<table class='summary highlight'>\n";
         $FileChgs .= "<tr>";
         $FileChgs .= "<th>File Type</th>";
         $FileChgs .= "<th>Total</th>";
@@ -3391,10 +3554,10 @@ sub get_Summary()
         $FileChgs .= "No files\n";
     }
     
-    return $TestInfo.$TestResults.get_Report_Headers().get_Report_Deps().$FileChgs;
+    return $TestInfo.$TestResults.getReportHeaders().getReportDeps().$FileChgs;
 }
 
-sub get_Source()
+sub getSource()
 {
     my $Packages = "<a name='Packages'></a>\n";
     my %Pkgs = map {$_=>1} (keys(%{$TargetPackages{1}}), keys(%{$TargetPackages{2}}));
@@ -3424,35 +3587,35 @@ sub createReport($)
     }
     else
     {
-        $Title = get_Title().": ".$Group{"V1"}." to ".$Group{"V2"}." changes report";
-        $Keywords = get_Title().", changes, report";
+        $Title = getTitle().": ".$Group{"V1"}." to ".$Group{"V2"}." changes report";
+        $Keywords = getTitle().", changes, report";
     }
     
-    my $Header = get_Header();
+    my $Header = getHeader();
     my $Description = $Header;
     $Description=~s/<[^<>]+>//g;
     
     my $Report = $Header."\n";
-    my $MainReport = get_Report_Files();
+    my $MainReport = getReportFiles();
     
-    my $Legend = "<br/><table class='summary'>
+    my $Legend = "<br/><table class='summary highlight'>
     <tr><td class='new' width='80px'>added</td><td class='passed' width='80px'>unchanged</td></tr>
     <tr><td class='warning'>changed</td><td class='failed'>removed</td></tr></table>\n";
     
     $Report .= $Legend;
-    $Report .= get_Summary();
+    $Report .= getSummary();
     $Report .= $MainReport;
     
     if(not $CompareDirs)
     {
-        $Report .= get_Report_Usage();
-        $Report .= get_Source();
+        $Report .= getReportUsage();
+        $Report .= getSource();
     }
     
     $Report .= "<br/><a class='top_ref' href='#Top'>to the top</a><br/>\n";
     
     $STAT_LINE = "changed:".$RESULT{"affected"}.";".$STAT_LINE."tool_version:".$TOOL_VERSION;
-    $Report = "<!-- $STAT_LINE -->\n".composeHTML_Head($Title, $Keywords, $Description, $CssStyles, $JScripts)."\n<body>\n<div><a name='Top'></a>\n".$Report;
+    $Report = "<!-- $STAT_LINE -->\n".composeHTMLHead($Title, $Keywords, $Description, $CssStyles, $JScripts)."\n<body>\n<div><a name='Top'></a>\n".$Report;
     $Report .= "</div>\n<br/><br/><br/><hr/>\n";
     
     # footer
@@ -3474,20 +3637,20 @@ sub createReport($)
     printMsg("INFO", "report: $Path");
 }
 
-sub check_Cmd($)
+sub checkCmd($)
 {
     my $Cmd = $_[0];
-    return "" if(not $Cmd);
-    if(defined $Cache{"check_Cmd"}{$Cmd}) {
-        return $Cache{"check_Cmd"}{$Cmd};
+    
+    if(defined $Cache{"checkCmd"}{$Cmd}) {
+        return $Cache{"checkCmd"}{$Cmd};
     }
     foreach my $Path (sort {length($a)<=>length($b)} split(/:/, $ENV{"PATH"}))
     {
         if(-x $Path."/".$Cmd) {
-            return ($Cache{"check_Cmd"}{$Cmd} = 1);
+            return ($Cache{"checkCmd"}{$Cmd} = 1);
         }
     }
-    return ($Cache{"check_Cmd"}{$Cmd} = 0);
+    return ($Cache{"checkCmd"}{$Cmd} = 0);
 }
 
 sub readFileTypes()
@@ -3593,7 +3756,7 @@ sub autoAnchor($)
     return $Anchor;
 }
 
-sub get_dumpversion($)
+sub getDumpversion($)
 {
     my $Cmd = $_[0];
     return `$Cmd -dumpversion 2>$TMP_DIR/null`;
@@ -3629,16 +3792,23 @@ sub getArchivePattern()
     return join("|", @Groups);
 }
 
+sub encodeUrl($)
+{
+    my $Url = $_[0];
+    $Url=~s/#/\%23/g;
+    return $Url;
+}
+
 sub scenario()
 {
     if($Help)
     {
-        HELP_MESSAGE();
+        helpMsg();
         exit(0);
     }
     if($ShowVersion)
     {
-        printMsg("INFO", "Package Changes Analyzer (PkgDiff) $TOOL_VERSION\nCopyright (C) 2016 Andrey Ponomarenko's ABI Laboratory\nLicense: GNU GPL <http://www.gnu.org/licenses/>\nThis program is free software: you can redistribute it and/or modify it.\n\nWritten by Andrey Ponomarenko.");
+        printMsg("INFO", "Package Changes Analyzer (PkgDiff) $TOOL_VERSION\nCopyright (C) 2018 Andrey Ponomarenko's ABI Laboratory\nLicense: GNU GPL <http://www.gnu.org/licenses/>\nThis program is free software: you can redistribute it and/or modify it.\n\nWritten by Andrey Ponomarenko.");
         exit(0);
     }
     if($DumpVersion)
@@ -3651,6 +3821,16 @@ sub scenario()
         generateTemplate();
         exit(0);
     }
+    
+    if(checkModule("File/LibMagic.pm"))
+    {
+        $USE_LIBMAGIC = 1;
+        require File::LibMagic;
+    }
+    else {
+        printMsg("WARNING", "perl-File-LibMagic is not installed");
+    }
+    
     if(not $DiffWidth) {
         $DiffWidth = $DEFAULT_WIDTH;
     }
@@ -3667,13 +3847,13 @@ sub scenario()
         exitStatus("Not_Found", "can't access \"$DIFF\"");
     }
     
-    if(not check_Cmd("wdiff")) {
+    if(not checkCmd("wdiff")) {
         print STDERR "WARNING: wdiff is not installed\n";
     }
     
     if(not $LinksTarget)
     {
-        $LinksTarget = "_blank";
+        $LinksTarget = "_self";
     }
     else
     {
@@ -3685,7 +3865,7 @@ sub scenario()
     
     if($ShowDetails)
     {
-        if(my $V = get_dumpversion($ACC))
+        if(my $V = getDumpversion($ACC))
         {
             if(cmpVersions($V, $ACC_VER)==-1)
             {
@@ -3699,7 +3879,7 @@ sub scenario()
             $ACC = undef;
         }
         
-        if(my $V = get_dumpversion($ABI_DUMPER))
+        if(my $V = getDumpversion($ABI_DUMPER))
         {
             if(cmpVersions($V, $ABI_DUMPER_VER)==-1)
             {
@@ -3730,6 +3910,8 @@ sub scenario()
         if(not -d $Descriptor{2}) {
             exitStatus("Access_Error", "can't access directory \'".$Descriptor{2}."\'");
         }
+        $Descriptor{1} = getAbsPath($Descriptor{1});
+        $Descriptor{2} = getAbsPath($Descriptor{2});
     }
     else
     {
@@ -3744,10 +3926,10 @@ sub scenario()
     readFileTypes();
     
     if($CompareDirs) {
-        printMsg("INFO", "reading directories ...");
+        printMsg("INFO", "Reading directories ...");
     }
     else {
-        printMsg("INFO", "reading packages ...");
+        printMsg("INFO", "Reading packages ...");
     }
     
     my $Fmt1 = getFormat($Descriptor{1});
@@ -3757,8 +3939,8 @@ sub scenario()
     
     if($CompareDirs and $Fmt1 eq "DIR")
     {
-        $RemovePrefix{1} = get_dirname($Descriptor{1});
-        $RemovePrefix{2} = get_dirname($Descriptor{2});
+        $RemovePrefix{1} = getDirname($Descriptor{1});
+        $RemovePrefix{2} = getDirname($Descriptor{2});
     }
     elsif($Fmt1 eq "ARCHIVE" and $Fmt2 eq "ARCHIVE")
     { # check if we can remove a common prefix from files of BOTH packages
@@ -3780,7 +3962,7 @@ sub scenario()
     if($CompareDirs and $Fmt1 eq "DIR")
     {
         registerPackage($Descriptor{1}, 1);
-        $Group{"Name1"} = get_filename($Descriptor{1});
+        $Group{"Name1"} = getFilename($Descriptor{1});
         if($TargetVersion{1}) {
             $Group{"V1"} = $TargetVersion{1};
         }
@@ -3813,7 +3995,7 @@ sub scenario()
     if($CompareDirs and $Fmt1 eq "DIR")
     {
         registerPackage($Descriptor{2}, 2);
-        $Group{"Name2"} = get_filename($Descriptor{2});
+        $Group{"Name2"} = getFilename($Descriptor{2});
         if($TargetVersion{2}) {
             $Group{"V2"} = $TargetVersion{2};
         }
@@ -3884,7 +4066,7 @@ sub scenario()
     if($OutputReportPath)
     { # user-defined path
         $REPORT_PATH = $OutputReportPath;
-        $REPORT_DIR = get_dirname($REPORT_PATH);
+        $REPORT_DIR = getDirname($REPORT_PATH);
         if(not $REPORT_DIR) {
             $REPORT_DIR = ".";
         }
@@ -3902,15 +4084,28 @@ sub scenario()
         $REPORT_PATH = $REPORT_DIR."/changes_report.html";
         if(-d $REPORT_DIR)
         {
-            rmtree($REPORT_DIR."/info-diffs");
-            rmtree($REPORT_DIR."/diffs");
-            rmtree($REPORT_DIR."/details");
+            foreach my $E ("info-diffs", "diffs", "details") {
+                rmtree($REPORT_DIR."/".$E);
+            }
         }
     }
-    printMsg("INFO", "comparing packages ...");
+    
+    if($CompareDirs) {
+        printMsg("INFO", "Comparing directories ...");
+    }
+    else {
+        printMsg("INFO", "Comparing packages ...");
+    }
     
     detectChanges();
     createReport($REPORT_PATH);
+    
+    foreach my $E ("info-diffs", "diffs", "details")
+    {
+        if(not listDir($REPORT_DIR."/".$E)) {
+            rmtree($REPORT_DIR."/".$E);
+        }
+    }
     
     if($ExtraInfo) {
         writeExtraInfo();
@@ -3919,6 +4114,7 @@ sub scenario()
     if($CustomTmpDir) {
         cleanTmp();
     }
+    
     exit($ERROR_CODE{$RESULT{"status"}});
 }
 
